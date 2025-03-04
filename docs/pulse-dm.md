@@ -34,46 +34,90 @@ graph TB
     classDef client fill:#e3f2fd,stroke:#1976d2,stroke-width:2px
     classDef server fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px
     classDef blockchain fill:#e8f5e9,stroke:#388e3c,stroke-width:2px
+    classDef middleware fill:#fff3e0,stroke:#ef6c00,stroke-width:2px
+    classDef storage fill:#fce4ec,stroke:#c2185b,stroke-width:2px
 
     %% 客户端层
     subgraph Client["客户端层"]
-        direction LR
+        direction TB
         UI[用户界面]
-        SignalClient[Signal协议]
-        SendbirdClient[Sendbird]
+        SignalClient[Signal协议客户端]
+        SendbirdClient[Sendbird客户端]
+        LocalDB[本地存储]
         
         UI --> SignalClient
         UI --> SendbirdClient
+        SignalClient --> LocalDB
+        SendbirdClient --> LocalDB
     end
 
     %% 服务层
     subgraph Server["服务层"]
-        direction LR
-        PulseSocial[Pulse Social]
-        SendbirdServer[Sendbird服务]
+        direction TB
+        subgraph Core["核心服务"]
+            ChatService[聊天服务]
+            UserService[用户服务]
+            KeyService[密钥管理服务]
+            RelationService[关系管理服务]
+        end
         
-        PulseSocial --> SendbirdServer
+        subgraph Cache["缓存层"]
+            Redis[(Redis缓存)]
+        end
+        
+        subgraph Storage["存储层"]
+            PostgreSQL[(PostgreSQL)]
+            MongoDB[(MongoDB)]
+        end
+        
+        subgraph Message["消息服务"]
+            SendbirdServer[Sendbird服务]
+            MQ[消息队列]
+        end
+        
+        %% 服务层连接
+        ChatService --> Redis
+        UserService --> Redis
+        KeyService --> Redis
+        RelationService --> Redis
+        
+        ChatService --> PostgreSQL
+        UserService --> PostgreSQL
+        KeyService --> MongoDB
+        RelationService --> PostgreSQL
+        
+        Core --> MQ
+        MQ --> SendbirdServer
     end
 
     %% 区块链层
     subgraph Blockchain["区块链层"]
-        direction LR
-        ChainListener[链上监听]
+        direction TB
+        ChainListener[链上监听服务]
         DataWarehouse[数据仓库]
+        BalanceCache[余额缓存]
         
         ChainListener --> DataWarehouse
+        ChainListener --> BalanceCache
+        DataWarehouse --> BalanceCache
     end
 
     %% 跨层连接
-    SignalClient --> PulseSocial
+    SignalClient --> KeyService
+    SignalClient --> ChatService
     SendbirdClient --> SendbirdServer
-    PulseSocial --> ChainListener
-    PulseSocial --> DataWarehouse
+    UI --> UserService
+    UI --> RelationService
+    
+    Core --> ChainListener
+    Core --> BalanceCache
 
     %% 应用样式
-    class UI,SignalClient,SendbirdClient client
-    class PulseSocial,SendbirdServer server
-    class ChainListener,DataWarehouse blockchain
+    class UI,SignalClient,SendbirdClient,LocalDB client
+    class ChatService,UserService,KeyService,RelationService,Core server
+    class ChainListener,DataWarehouse,BalanceCache blockchain
+    class Redis,MQ middleware
+    class PostgreSQL,MongoDB storage
 ```
 
 ### 4.2 组件说明
@@ -122,16 +166,6 @@ sequenceDiagram
     Note over B: 1. DH1 = DH(身份私钥B, 身份公钥A)<br/>2. DH2 = DH(身份私钥B, 临时公钥A)<br/>3. DH3 = DH(预密钥B, 临时公钥A)<br/>4. 会话密钥 = KDF(DH1 || DH2 || DH3)
     B->>B: 使用会话密钥解密消息
     B->>B: 显示原文
-```
-
-### 4.4 钱包余额查询流程
-```mermaid
-graph TD
-    A[定时任务] --> B{是否活跃用户?}
-    B -->|是| C[链上实时监听]
-    B -->|否| D[数据仓库查询]
-    C --> E[更新余额缓存]
-    D --> E
 ```
 
 ## 5. 技术方案
@@ -646,30 +680,311 @@ EncryptedMessage 对象字段说明：
 }
 ```
 
+#### 6.2.0 预密钥管理机制
+
+1. **预密钥配额**
+   ```json
+   {
+       "maxPreKeysPerDevice": 100,    // 每个设备最大预密钥数量
+       "minPreKeysThreshold": 20,     // 最小阈值
+       "batchUploadSize": 50,         // 批量上传大小
+       "preKeyTTL": 604800,          // 预密钥有效期(7天)
+       "signedPreKey": {
+           "rotationInterval": 604800  // 签名预密钥轮换间隔(7天)
+       }
+   }
+   ```
+
+2. **预密钥状态**
+   ```json
+   {
+       "AVAILABLE": "可用",
+       "USED": "已使用",
+       "EXPIRED": "已过期"
+   }
+   ```
+
+3. **客户端主动管理机制**
+   - 客户端负责生成和管理所有密钥
+   - 客户端在以下时机检查预密钥数量：
+     * 应用启动时
+     * 发送/接收消息前
+     * 定期检查(如每天)
+   - 当预密钥数量低于阈值时，客户端自动生成新的预密钥并上传
+
+4. **服务端职责**
+   - 仅作为密钥分发中心
+   - 存储和分发预密钥包
+   - 维护预密钥使用状态
+   - 提供预密钥数量查询接口
+
+5. **预密钥分发流程**
+   ```mermaid
+   sequenceDiagram
+       participant A as 发送方
+       participant Server as 密钥服务器
+       participant B as 接收方
+       
+       B->>B: 生成预密钥
+       B->>Server: 上传预密钥包
+       
+       A->>Server: 请求B的预密钥
+       alt 有可用的一次性预密钥
+           Server-->>A: 返回一次性预密钥包
+           Server->>Server: 标记预密钥为已使用
+       else 一次性预密钥耗尽
+           Server-->>A: 返回签名预密钥包
+       end
+       
+       B->>Server: 查询预密钥数量
+       Server-->>B: 返回可用数量
+       Note over B: 如果数量低于阈值
+       B->>B: 生成新预密钥
+       B->>Server: 上传新预密钥包
+   ```
+
+6. **密钥生成规则**
+   - 长期身份密钥对：设备首次注册时生成
+   - 签名预密钥：每个设备只维护一个当前有效的签名预密钥，定期轮换(如每周)
+   - 一次性预密钥对：批量生成，保持充足数量
+
+7. **预密钥耗尽处理机制**
+   - 正常模式：使用一次性预密钥
+     * 优先使用一次性预密钥建立会话
+     * 每个预密钥只使用一次，确保最佳安全性
+   
+   - 降级模式：使用签名预密钥
+     * 当一次性预密钥耗尽时，使用签名预密钥
+     * 多个会话可以共用同一个签名预密钥
+     * 仍然保证基本的前向安全性
+   
+   - 应急模式：设备完全离线
+     * 当设备长期离线导致签名预密钥也过期时
+     * 服务端将该设备标记为"需要重新注册"状态
+     * 其他用户尝试建立新会话时返回错误提示
+     * 设备重新上线后需要重新生成并上传密钥包
+     * 用户界面提示"等待对方设备上线后才能发送消息"
+
+   - 安全考虑：
+     * 签名预密钥由身份密钥签名，可验证其有效性
+     * 定期轮换签名预密钥降低风险
+     * 完全离线时阻止新会话，而不是降低安全性
+
 ### 6.3 聊天列表
- 群聊/单聊混排
- 现有接口改造
 
-### 6.4 单聊关系维护
-- follow关系
-    - follow接口
-    - unfollow接口
-- 已有聊天：要支持是否显示控制
-    - 删除单聊
+#### 6.3.1 聊天列表数据结构
+**ChatItem 对象字段说明：**
+```json
+{
+    "id": "聊天项ID",
+    "chatType": "聊天类型(GROUP/PRIVATE)",
+    "channelUrl": "Sendbird频道URL",
+    "name": "显示名称",
+    "profileUrl": "头像URL",
+    "backdropUrl": "背景图URL",
+    "pinned": "是否置顶",
+    "latestMessageId": "最新消息ID",
+    "latestMessageTime": "最新消息时间",
+    "unreadCount": "未读消息数",
+    "status": "状态(ACTIVE/ARCHIVED)",
+    "metadata": {
+        "groupInfo": {  // 群聊特有字段
+            "managerUserId": "管理员用户ID",
+            "memberCount": "成员数量",
+            "dayAllowance": "日限额",
+            "assetAmount": "资产金额",
+            "groupCategory": "群组类别",
+            "chainName": "链名称",
+            "tokenAddress": "代币地址",
+            "joinConditions": "加入条件",
+            "supplier": "供应商"
+        },
+        "privateInfo": {  // 单聊特有字段
+            "targetUserId": "目标用户ID",
+            "encryptionEnabled": true,
+            "followStatus": "关注状态"
+        }
+    }
+}
+```
 
-### 6.5 聊天发起
-- 目标用户搜索&排序
-- 新发的单聊：相当于建组和消息同时触发，接收端实时通知机制
+#### 6.3.2 获取聊天列表接口 (getChatList)
+**使用场景**：获取用户的聊天列表，包含群聊和单聊。按最新消息时间倒序排列。
 
-### 6.6 用户封禁
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| userId | String | 用户ID |
+| filter | ChatFilter | 过滤条件 |
+| 返回值 | ChatListResponse | 聊天列表响应 |
+
+ChatFilter 对象字段说明：
+```json
+{
+    "chatTypes": ["GROUP", "PRIVATE"],
+    "status": ["ACTIVE", "ARCHIVED"],
+    "showHidden": false
+}
+```
+
+ChatListResponse 对象字段说明：
+```json
+{
+    "items": [ChatItem]
+}
+```
+
+#### 6.3.3 聊天项更新接口 (updateChatItem)
+**使用场景**：更新聊天列表中的项目属性，如置顶、隐藏等。
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| userId | String | 用户ID |
+| chatId | String | 聊天项ID |
+| updates | ChatItemUpdates | 更新内容 |
+| 返回值 | boolean | 更新结果 |
+
+ChatItemUpdates 对象字段说明：
+```json
+{
+    "pinned": "是否置顶",
+    "hidden": "是否隐藏",
+    "status": "状态(ACTIVE/ARCHIVED)"
+}
+```
+
+### 6.4 单聊关系管理
+
+#### 6.4.1 关系存储设计
+
+1. **关注关系表(user_follows)**
+
+| 字段名 | 类型 | 说明 | 索引 |
+|-------|------|------|------|
+| id | bigint | 主键 | PK |
+| user_id | varchar(64) | 关注者用户ID | IDX |
+| target_user_id | varchar(64) | 被关注者用户ID | IDX |
+| follow_status | varchar(20) | 关注状态(FOLLOWING/BLOCKED) | - |
+| created_at | timestamp | 关注时间 | - |
+| updated_at | timestamp | 更新时间 | - |
+| metadata | jsonb | 扩展信息 | - |
+
+联合唯一索引: (user_id, target_user_id)
+
+2. **关系统计表(user_follow_stats)**
+
+| 字段名 | 类型 | 说明 | 索引 |
+|-------|------|------|------|
+| user_id | varchar(64) | 用户ID | PK |
+| following_count | int | 关注数 | - |
+| followers_count | int | 粉丝数 | - |
+| mutual_count | int | 互关数 | - |
+| updated_at | timestamp | 更新时间 | - |
+
+#### 6.4.2 关系管理接口
+
+1. **关注用户 (followUser)**
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| userId | String | 当前用户ID |
+| targetUserId | String | 目标用户ID |
+| 返回值 | FollowResponse | 关注结果响应 |
+
+FollowResponse 对象字段说明：
+```json
+{
+    "followStatus": "关注状态(FOLLOWING/BLOCKED)",
+    "timestamp": "关注时间",
+    "metadata": {
+        "isFollowBack": "是否互相关注"
+    }
+}
+```
+
+2. **取消关注 (unfollowUser)**
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| userId | String | 当前用户ID |
+| targetUserId | String | 目标用户ID |
+| 返回值 | boolean | 取消关注结果 |
+
+3. **获取关系状态 (getRelationship)**
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| userId | String | 当前用户ID |
+| targetUserId | String | 目标用户ID |
+| 返回值 | RelationshipInfo | 关系信息 |
+
+RelationshipInfo 对象字段说明：
+```json
+{
+    "followStatus": "关注状态",
+    "chatStatus": "聊天状态",
+    "lastInteractionAt": "最后互动时间",
+    "blockStatus": "拦截状态"
+}
+```
+
+#### 6.4.3 用户搜索接口 (searchUsers)
+**使用场景**：搜索可能的聊天对象。
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| keyword | String | 搜索关键词 |
+| filter | UserSearchFilter | 搜索过滤条件 |
+| pageSize | int | 分页大小 |
+| cursor | String | 分页游标 |
+| 返回值 | UserSearchResponse | 用户搜索结果 |
+
+UserSearchFilter 对象字段说明：
+```json
+{
+    "followStatus": ["FOLLOWING", "FOLLOWERS", "MUTUAL"]
+}
+```
+
+**默认排序规则**：
+1. 互相关注的用户优先，按资产金额从高到低
+2. 已关注用户次之，按资产金额从高到低
+3. 未关注用户最后，按资产金额从高到低
+
+#### 6.4.4 聊天可见性控制
+1. **更新聊天可见性 (updateChatVisibility)**
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| userId | String | 用户ID |
+| chatId | String | 聊天ID |
+| visibility | ChatVisibility | 可见性设置 |
+| 返回值 | boolean | 更新结果 |
+
+ChatVisibility 对象字段说明：
+```json
+{
+    "isVisible": "是否可见",
+    "archiveReason": "归档原因"
+}
+```
+
+### 6.5 用户封禁
 封禁后，直接在对应senbird群组中设置禁言。
 
-### 6.7 聊天限制
+### 6.6 聊天限制
 只有满足条件，才会授予在senbird群组发言的权限。
 
-### 6.8 用户钱包余额查询
+### 6.7 用户钱包余额查询
+```mermaid
+graph TD
+    A[定时任务] --> B{是否活跃用户?}
+    B -->|是| C[链上实时监听]
+    B -->|否| D[数据仓库查询]
+    C --> E[更新余额缓存]
+    D --> E
+```
 
-### 6.9 消息历史记录
+### 6.8 消息历史记录
 依然从sendbird拉取，但都是秘文，无法查看，只能用作统计
 
 
