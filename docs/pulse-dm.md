@@ -4,19 +4,33 @@
 本文档描述基于Sendbird实现的Web3 DM单聊功能，集成Signal Protocol实现End-to-End Encryption，并支持基于用户AA钱包余额的功能。
 
 ## 2. 功能需求
-- 单聊通信：通过Sendbird传递Ciphertext
-- End-to-End Encryption： 通过Signal Protocol加密，后端实现Public Key/PreKey分发
-- 消息列表： 群聊/单聊混排
-- 单聊关系维护：
-    - follow关系
-    - 已有聊天：要支持是否显示控制
-- 聊天发起
-    - 目标用户搜索&排序
-    - 新发的单聊：相当于建组和消息同时触发，接收端实时通知机制
-- 用户封禁：封禁后，直接在对应Sendbird群组中设置禁言。
-- 聊天限制：只有满足条件，才会授予在Sendbird群组发言的权限。
-- 用户钱包余额查询
-- 消息历史记录：依然从Sendbird拉取，但都是Ciphertext，无法查看，只能用作统计
+
+### 2.1 基础功能
+- 基于Sendbird的端到端加密单聊
+- Signal Protocol key 存储/维护/分发
+- 多设备激活管理
+- 实时消息推送
+
+### 2.2 聊天管理
+- 群聊/单聊混合列表
+- 置顶/归档/隐藏会话
+
+### 2.3 用户关系
+- 关注/取消关注
+- 用户封禁
+- 垃圾信息举报
+- 关系状态查询
+
+### 2.4 权限控制
+- 钱包绑定验证
+- 付费解锁聊天
+- 双向关注特权
+- Sendbird频道权限
+
+### 2.5 系统集成
+- 钱包余额监控
+- Pulse记录管理
+- Push通知服务
 
 ## 3. 非功能需求
 - 消息实时性
@@ -57,7 +71,7 @@ graph TB
         subgraph Core["核心服务"]
             ChatService[聊天服务]
             UserService[用户服务]
-            KeyService[密钥管理服务]
+            KeyService[key管理服务]
             RelationService[关系管理服务]
         end
         
@@ -66,8 +80,7 @@ graph TB
         end
         
         subgraph Storage["存储层"]
-            PostgreSQL[(PostgreSQL)]
-            MongoDB[(MongoDB)]
+            SQL[(SQL)]
         end
         
         subgraph Message["消息服务"]
@@ -81,10 +94,10 @@ graph TB
         KeyService --> Redis
         RelationService --> Redis
         
-        ChatService --> PostgreSQL
-        UserService --> PostgreSQL
-        KeyService --> MongoDB
-        RelationService --> PostgreSQL
+        ChatService --> SQL
+        UserService --> SQL
+        KeyService --> SQL
+        RelationService --> SQL
         
         Core --> MQ
         MQ --> SendbirdServer
@@ -117,7 +130,6 @@ graph TB
     class ChatService,UserService,KeyService,RelationService,Core server
     class ChainListener,DataWarehouse,BalanceCache blockchain
     class Redis,MQ middleware
-    class PostgreSQL,MongoDB storage
 ```
 
 ### 4.2 组件说明
@@ -207,10 +219,18 @@ sequenceDiagram
 ## 5. 技术方案
 
 ### 5.1 消息加密方案
-- 使用Signal Protocol实现端到端加密
-- 每个会话生成唯一的会话密钥
-- 支持消息前向安全性
-- 密钥协商使用X3DH协议
+
+#### 5.1.1 核心机制
+- 基于Signal Protocol的端到端加密（E2EE）实现
+- 采用双棘轮（Double Ratchet）算法，确保消息前向安全性
+- 使用X3DH（Extended Triple Diffie-Hellman）密钥协商机制
+- 支持异步消息加密，适应多设备场景
+
+#### 5.1.2 安全特性
+- 完美前向保密（Perfect Forward Secrecy）
+- 中间人攻击防护
+- 消息完整性校验
+- 支持未来量子计算防护
 
 ### 5.2 钱包余额监控方案
 1. 实时监听：
@@ -229,11 +249,13 @@ sequenceDiagram
 ### 6.1 单聊通信
 
 #### 6.1.1 多设备通信架构
-Signal协议的多设备支持主要基于以下原则:
+多设备支持主要基于以下原则:
 1. 每个用户可以注册多个设备
 2. 每个设备都有独立的密钥对
-3. 消息需要分别加密发送给接收方的每个设备
+3. 消息可以分别加密发送给接收方的每个设备，本次只发送指定的激活设备
 4. 每个设备独立维护自己的会话状态
+5. 服务端会为每一对设备维护一个senbird channel
+
 
 ```mermaid
 graph TB
@@ -301,9 +323,8 @@ graph TB
 
 2. **设备信息收集**
    - 时机：
-     * 首次安装应用时
-     * 用户登录新设备时
-     * 设备令牌更新时
+     * 用户绑定AA钱包
+     * 用户进入聊天页面
    - 收集内容：
      * 设备唯一标识符
      * 设备类型(iOS/Android/Desktop)
@@ -331,14 +352,15 @@ graph TB
    - 设备丢失不影响其他设备的安全性
 
 #### 6.1.4 频道信息查询接口 (getChannelInfo)
-**使用场景**：当用户需要与其他用户通信时，查询对应设备的Sendbird频道信息，用于建立WebSocket连接。
+**使用场景**：
+- 当用户需要与其他用户通信时，查询对应设备的Sendbird频道信息，用于建立WebSocket连接。
+- 注意这个服务调用，会触发sendbird channel创建。在用户还没有满足发送消息条件时，这个接口返回的信息中，没有sendbird channel。
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
 | userId | String | 用户ID |
 | deviceId | String | 设备ID |
 | targetUserId | String | 目标用户ID |
-| targetDeviceId | String | 目标设备ID |
 | 返回值 | ChannelInfo | 频道信息响应 |
 
 ChannelInfo 对象字段说明：
@@ -353,7 +375,7 @@ ChannelInfo 对象字段说明：
     "metadata": {
         "encryptionEnabled": true,
         "deviceInfo": {
-            "deviceId": "目标设备ID",
+            "deviceId": "目标设备ID（当前激活设备）",
             "deviceType": "设备类型"
         }
     }
@@ -367,7 +389,6 @@ ChannelInfo 对象字段说明：
 |------|------|------|
 | userId | String | 用户ID |
 | deviceInfo | DeviceInfo | 设备信息对象 |
-| keyBundle | KeyBundle | 密钥包信息 |
 | 返回值 | DeviceRegistrationResponse | 设备注册响应 |
 
 DeviceInfo 对象字段说明：
@@ -378,29 +399,10 @@ DeviceInfo 对象字段说明：
     "osVersion": "操作系统版本",
     "appVersion": "应用版本号",
     "pushToken": "推送通知令牌",
-    "registrationId": "Signal协议注册ID"
+    "registrationId": "Signal协议注册ID"，
+    "identityPublicKey": "Identity Public Key"
 }
 ```
-
-KeyBundle 对象字段说明：
-```json
-{
-    "identityKey": {
-        "publicKey": "身份公钥",
-        "signature": "身份密钥签名"
-    },
-    "signedPreKey": {
-        "keyId": "签名预密钥ID",
-        "publicKey": "签名预密钥公钥",
-        "signature": "签名"
-    },
-    "oneTimePreKeys": [{
-        "keyId": "预密钥ID",
-        "publicKey": "预密钥公钥"
-    }]
-}
-```
-
 DeviceRegistrationResponse 对象字段说明：
 ```json
 {
@@ -414,12 +416,6 @@ DeviceRegistrationResponse 对象字段说明：
     }]
 }
 ```
-
-注意事项：
-1. 所有私钥都在客户端本地生成和保存，永不上传
-2. 服务端作为密钥分发中心，只存储和分发公钥
-3. 设备注册是一个原子操作，设备信息和密钥包必须同时注册成功
-4. 注册成功后，设备即可参与加密通信
 
 #### 6.1.6 消息传输流程
 1. **建立连接**
@@ -455,29 +451,8 @@ DeviceRegistrationResponse 对象字段说明：
    - 服务端不存储任何密钥和消息明文
    - 频道信息按需查询，不做本地持久化
 
-#### 6.1.7 安全考虑
-1. **密钥安全**
-   - 私钥仅存在于设备本地
-   - 不提供密钥备份功能
-   - 设备丢失意味着消息不可恢复
-
-2. **消息安全**
-   - 端到端加密
-   - 每个设备独立加密
-   - 完美前向保密
-   - 防止重放攻击
-
-3. **设备安全**
-   - 设备认证和授权
-   - 可疑设备检测
-   - 设备数量限制
-   - 非活跃设备清理
-
-4. **传输安全**
-   - WebSocket TLS加密
-   - 消息签名验证
-   - 会话保护
-   - 频道访问控制
+#### 6.1.7 设备激活逻辑
+待确定
 
 ### 6.2 消息端到端加密
 - 通过signal协议加密，后端实现公钥/预密钥分发
@@ -608,8 +583,8 @@ GetPreKeysResponse 对象字段说明：
 GetPreKeyCountResponse 对象字段说明：
 ```json
 {
-    "ecPreKeyCount": "int",  // ACI EC PreKey count
-    "kemPreKeyCount": "int" // ACI KEM PreKey count
+    "ecPreKeyCount": "int",  // EC PreKey count
+    "kemPreKeyCount": "int" // KEM PreKey count
 }
 ```
 
@@ -618,7 +593,6 @@ GetPreKeyCountResponse 对象字段说明：
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
-| identityType | IdentityType | Identity Type (ACI or PNI) |
 | preKeys | List<EcPreKey> | EC PreKey List |
 | 返回值 | SetPreKeyResponse | Empty response indicates success |
 
@@ -635,7 +609,6 @@ EcPreKey 对象字段说明：
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
-| identityType | IdentityType | Identity Type (ACI or PNI) |
 | signedPreKey | EcSignedPreKey | EC Signed PreKey Object |
 | 返回值 | SetPreKeyResponse | Empty response indicates success |
 
@@ -653,7 +626,6 @@ EcSignedPreKey 对象字段说明：
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
-| identityType | IdentityType | Identity Type (ACI or PNI) |
 | preKeys | List<KemSignedPreKey> | KEM Signed PreKey List |
 | 返回值 | SetPreKeyResponse | Empty response indicates success |
 
@@ -888,7 +860,9 @@ EncryptedMessage 对象字段说明：
 ```
 
 #### 6.3.2 获取聊天列表接口 (getChatList)
-**使用场景**：获取用户的聊天列表，包含群聊和单聊。按最新消息时间倒序排列。
+**使用场景**：
+- 获取用户的聊天列表，包含群聊和单聊。按最新消息时间倒序排列。
+- 由于Web端不支持单聊，不能复用以前，这个接口为新增。
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
@@ -935,21 +909,45 @@ ChatItemUpdates 对象字段说明：
 
 #### 6.4.1 关系存储设计
 
-1. **关注关系表(user_follows)**
+1. **用户关系表(user_relationships)**
 
 | 字段名 | 类型 | 说明 | 索引 |
 |-------|------|------|------|
 | id | bigint | 主键 | PK |
-| user_id | varchar(64) | 关注者用户ID | IDX |
-| target_user_id | varchar(64) | 被关注者用户ID | IDX |
-| follow_status | varchar(20) | 关注状态(FOLLOWING/BLOCKED) | - |
-| created_at | timestamp | 关注时间 | - |
+| user_id | varchar(64) | 发起方用户ID | IDX |
+| target_user_id | varchar(64) | 接收方用户ID | IDX |
+| relation_status | varchar(20) | 关系状态(FOLLOWING/BLOCKED/REPORTED) | - |
+| created_at | timestamp | 创建时间 | - |
 | updated_at | timestamp | 更新时间 | - |
 | metadata | jsonb | 扩展信息 | - |
 
 联合唯一索引: (user_id, target_user_id)
 
-2. **关系统计表(user_follow_stats)**
+metadata字段示例：
+```json
+{
+    "blockInfo": {
+        "reason": "封禁原因",
+        "blockedAt": "封禁时间",
+        "expireAt": "封禁过期时间（可选）",
+        "sendbirdChannelStatus": "频道状态"
+    },
+    "reportInfo": {
+        "reason": "举报原因",
+        "reportedAt": "举报时间",
+        "spamType": "垃圾信息类型",
+        "chatId": "相关聊天室ID",
+        "evidenceUrls": ["证据图片/视频URL"]
+    },
+    "followInfo": {
+        "isFollowBack": "是否互相关注",
+        "lastInteractionAt": "最后互动时间",
+        "chatPreference": "聊天偏好设置"
+    }
+}
+```
+
+2. **用户关系统计表(user_relationship_stats)**
 
 | 字段名 | 类型 | 说明 | 索引 |
 |-------|------|------|------|
@@ -957,7 +955,25 @@ ChatItemUpdates 对象字段说明：
 | following_count | int | 关注数 | - |
 | followers_count | int | 粉丝数 | - |
 | mutual_count | int | 互关数 | - |
+| blocked_count | int | 封禁数 | - |
+| reported_count | int | 举报数 | - |
 | updated_at | timestamp | 更新时间 | - |
+
+3. **关系状态说明**
+
+- FOLLOWING: 正常关注关系
+- BLOCKED: 已封禁状态，无法互相发送消息
+- REPORTED: 已举报状态，等待处理
+
+4. **数据一致性保证**
+- 使用事务确保关系表和统计表的同步更新
+- 定期运行统计修复任务
+- 缓存热点数据提升查询性能
+
+5. **扩展性考虑**
+- metadata使用jsonb类型，支持动态扩展字段
+- 预留relation_status其他状态值
+- 支持添加更多统计维度
 
 #### 6.4.2 关系管理接口
 
@@ -1007,7 +1023,9 @@ RelationshipInfo 对象字段说明：
 ```
 
 #### 6.4.3 用户搜索接口 (searchUsers)
-**使用场景**：搜索可能的聊天对象。
+**使用场景**：
+- 搜索可能的聊天对象。
+- 只有初始上传了设备信息和prekey bundle的用户才能查询到
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
@@ -1029,7 +1047,88 @@ UserSearchFilter 对象字段说明：
 2. 已关注用户次之，按资产金额从高到低
 3. 未关注用户最后，按资产金额从高到低
 
-#### 6.4.4 聊天可见性控制
+#### 6.4.4 用户封禁与举报管理
+
+1. **关系存储**
+在user_relationships表
+
+2. **封禁用户接口 (blockUser)**
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| userId | String | 当前用户ID |
+| targetUserId | String | 目标用户ID |
+| reason | String | 封禁原因（可选） |
+| 返回值 | BlockResponse | 封禁结果响应 |
+
+BlockResponse 对象字段说明：
+```json
+{
+    "status": "封禁状态(SUCCESS/FAILED)",
+    "timestamp": "操作时间",
+    "metadata": {
+        "chatRoomStatus": "聊天室状态",
+        "sendbirdStatus": "Sendbird频道状态"
+    }
+}
+```
+
+3. **举报垃圾信息接口 (reportSpam)**
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| userId | String | 举报者用户ID |
+| targetUserId | String | 被举报用户ID |
+| chatId | String | 聊天室ID |
+| reason | String | 举报原因 |
+| 返回值 | ReportResponse | 举报结果响应 |
+
+ReportResponse 对象字段说明：
+```json
+{
+    "status": "举报状态",
+    "timestamp": "操作时间"
+}
+```
+
+4. **业务流程**
+
+```mermaid
+sequenceDiagram
+    participant User as 用户
+    participant Server as 服务端
+    participant Sendbird as Sendbird服务
+    
+    %% 封禁流程
+    User->>Server: blockUser(userId, targetId)
+    Server->>Server: 更新关系状态为BLOCKED
+    Server->>Sendbird: 设置频道禁言(如果频道存在)
+    Server-->>User: 返回封禁结果
+    
+    %% 举报流程
+    User->>Server: reportSpam(userId, targetId)
+    Server->>Server: 更新关系状态为REPORTED
+    Server->>Sendbird: 设置频道禁言(如果频道存在)
+    Server-->>User: 返回举报结果
+```
+
+5. **错误处理**
+```json
+{
+    "USER_ALREADY_BLOCKED": "用户已被封禁",
+    "INVALID_BLOCK_REQUEST": "无效的封禁请求",
+    "REPORT_ALREADY_SUBMITTED": "已提交过举报",
+}
+```
+
+6. **实现说明**
+- 封禁/举报操作会同时更新user_relationships表的关系状态
+- 通过metadata字段存储详细的封禁/举报信息
+- 自动同步更新Sendbird频道状态
+- 支持批量操作和状态查询
+- 提供违规用户管理接口（预留）
+
+#### 6.4.5 聊天可见性控制
 1. **更新聊天可见性 (updateChatVisibility)**
 
 | 参数 | 类型 | 说明 |
@@ -1047,13 +1146,100 @@ ChatVisibility 对象字段说明：
 }
 ```
 
-### 6.5 用户封禁
-封禁后，直接在对应Sendbird群组中设置禁言。
+### 6.5 聊天限制
 
-### 6.6 聊天限制
-只有满足条件，才会授予在Sendbird群组发言的权限。
+#### 6.5.1 聊天权限控制
+```mermaid
+flowchart LR
+    %% 设置图表方向为左到右，使布局更紧凑
+    A[发送消息] --> B{有钱包?}
+    B -->|否| C[提示创建]
+    B -->|是| D{接收方?}
+    D -->|是| E[无限制]
+    D -->|否| F{检查条件}
+    F --> G{双向关注?}
+    G -->|是| E
+    F --> H{已回复?}
+    H -->|是| E
+    F --> I{已付费?}
+    I -->|是| J[允许发送]
+    I -->|否| K[提示付费]
+```
 
-### 6.7 用户钱包余额查询
+#### 6.5.2 消息发送权限检查接口 (checkMessagePermission)
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| userId | String | 发送方用户ID |
+| targetUserId | String | 接收方用户ID |
+| 返回值 | MessagePermissionResponse | 权限检查结果 |
+
+MessagePermissionResponse 对象字段说明：
+```json
+{
+    "canSend": "是否可发送",
+    "reason": "限制原因",
+    "requiredPulseAmount": "需要支付的Pulse数量",
+    "currentStatus": {
+        "hasWallet": "是否有钱包",
+        "isReceiver": "是否为接收方",
+        "isMutualFollow": "是否双向关注",
+        "hasReply": "是否有回复",
+        "pulsePaid": "已支付Pulse数量"
+    }
+}
+```
+
+### 6.6 Pulse消耗记录列表
+
+#### 6.6.1 获取Pulse消耗记录接口 (getPulseTransactions)
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| userId | String | 用户ID |
+| filter | TransactionFilter | 过滤条件 |
+| pageSize | int | 分页大小 |
+| cursor | String | 分页游标 |
+| 返回值 | PulseTransactionResponse | 交易记录响应 |
+
+TransactionFilter 对象字段说明：
+```json
+{
+    "startTime": "开始时间",
+    "endTime": "结束时间",
+    "types": ["PAID_MESSAGE", "REWARD", "OTHER"],
+    "direction": ["DEBIT", "CREDIT"]
+}
+```
+
+PulseTransactionResponse 对象字段说明：
+```json
+{
+    "transactions": [{
+        "id": "交易ID",
+        "timestamp": "交易时间",
+        "category": "交易类别",
+        "amount": "数量",
+        "direction": "收支方向",
+        "details": {
+            "messageId": "消息ID（如果是消息付费）",
+            "targetUser": {
+                "userId": "目标用户ID",
+                "nickname": "目标用户昵称"
+            },
+            "description": "详细描述"
+        }
+    }],
+    "nextCursor": "下一页游标"
+}
+```
+
+### 6.7 Push Notification
+
+- 单聊的sendbird独立新建应用，不应干扰现有推送
+- 利用pulse现有的推送，指定推送内容。
+
+### 6.8 用户钱包余额查询
 ```mermaid
 graph TD
     A[定时任务] --> B{是否活跃用户?}
@@ -1062,10 +1248,6 @@ graph TD
     C --> E[更新余额缓存]
     D --> E
 ```
-
-### 6.8 消息历史记录
-依然从sendbird拉取，但都是秘文，无法查看，只能用作统计
-
 
 
 
