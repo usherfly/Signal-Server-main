@@ -1,22 +1,22 @@
 # Web3 DM聊天系统设计方案
 
 ## 1. 概述
-本文档描述基于Sendbird实现的Web3 DM单聊功能，集成Signal协议实现端到端加密，并支持基于用户AA钱包余额的功能。
+本文档描述基于Sendbird实现的Web3 DM单聊功能，集成Signal Protocol实现End-to-End Encryption，并支持基于用户AA钱包余额的功能。
 
 ## 2. 功能需求
-- 单聊通信：通过sendbird传递秘文
-- 消息端到端加密： 通过signal协议加密，后端实现公钥/预密钥分发
-- 聊天列表： 群聊/单聊混排
+- 单聊通信：通过Sendbird传递Ciphertext
+- End-to-End Encryption： 通过Signal Protocol加密，后端实现Public Key/PreKey分发
+- 消息列表： 群聊/单聊混排
 - 单聊关系维护：
     - follow关系
     - 已有聊天：要支持是否显示控制
 - 聊天发起
     - 目标用户搜索&排序
     - 新发的单聊：相当于建组和消息同时触发，接收端实时通知机制
-- 用户封禁：封禁后，直接在对应senbird群组中设置禁言。
-- 聊天限制：只有满足条件，才会授予在senbird群组发言的权限。
+- 用户封禁：封禁后，直接在对应Sendbird群组中设置禁言。
+- 聊天限制：只有满足条件，才会授予在Sendbird群组发言的权限。
 - 用户钱包余额查询
-- 消息历史记录：依然从sendbird拉取，但都是秘文，无法查看，只能用作统计
+- 消息历史记录：依然从Sendbird拉取，但都是Ciphertext，无法查看，只能用作统计
 
 ## 3. 非功能需求
 - 消息实时性
@@ -135,37 +135,73 @@ graph TB
    - 数据仓库：历史数据存储
 
 
-### 4.3 端加密消息通信流程
+### 4.3 End-to-End Encryption Message Flow
 ```mermaid
 sequenceDiagram
-    participant A as 用户A端
-    participant Pulse as Pulse Social
-    participant Sendbird as Sendbird服务
-    participant B as 用户B端
-    
-    %% 初始密钥交换阶段
-    A->>A: 生成身份密钥对(IdentityKey)
-    A->>A: 生成预密钥包(PreKeyBundle)
-    A->>Pulse: 上传身份公钥和预密钥包
-    B->>B: 生成身份密钥对(IdentityKey)
-    B->>B: 生成预密钥包(PreKeyBundle)
-    B->>Pulse: 上传身份公钥和预密钥包
-    
-    %% 会话建立阶段
-    A->>Pulse: 请求B的预密钥包
-    Pulse->>A: 返回B的预密钥包
-    A->>A: 执行X3DH密钥协商
-    Note over A: 1. DH1 = DH(身份私钥A, 身份公钥B)<br/>2. DH2 = DH(临时私钥A, 身份公钥B)<br/>3. DH3 = DH(临时私钥A, 预密钥B)<br/>4. 会话密钥 = KDF(DH1 || DH2 || DH3)
-    
-    %% 消息发送阶段
-    A->>A: 使用会话密钥加密消息
-    A->>Sendbird: 发送加密消息
-    
-    Sendbird->>B: 转发加密消息
-    B->>B: 执行X3DH密钥协商
-    Note over B: 1. DH1 = DH(身份私钥B, 身份公钥A)<br/>2. DH2 = DH(身份私钥B, 临时公钥A)<br/>3. DH3 = DH(预密钥B, 临时公钥A)<br/>4. 会话密钥 = KDF(DH1 || DH2 || DH3)
-    B->>B: 使用会话密钥解密消息
-    B->>B: 显示原文
+    participant Alice as Alice
+    participant Server as Pulse Server
+    participant Sendbird as Sendbird Service
+    participant Bob as Bob
+
+    %% Initial Setup Phase
+    rect rgb(240, 248, 255)
+        Note over Bob: Initial Setup
+        Note over Bob: Generate Identity Key Pair (IKB_pub, IKB_priv)
+        Note over Bob: Generate Signed PreKey Pair (SPKB_pub, SPKB_priv)
+        Note over Bob: Generate One-Time PreKey Pairs (OPKB_pub, OPKB_priv)
+        Bob->>+Server: Upload Public Keys Bundle:<br/>1. Identity Public Key (IKB_pub)<br/>2. Signed PreKey (SPKB_pub)<br/>3. Signature = Sign(IKB_priv, Encode(SPKB_pub))<br/>4. One-Time PreKeys (OPKB_pub)
+        Server-->>-Bob: Upload Success
+    end
+
+    %% Session Establishment Phase
+    rect rgb(255, 248, 240)
+        Note over Alice: Generate Identity Key Pair (IKA_pub, IKA_priv)
+        Note over Alice: Generate Ephemeral Key Pair (EKA_pub, EKA_priv)
+        Alice->>+Server: Request Bob's PreKey Bundle
+        Server-->>-Alice: Return Bundle:<br/>1. IKB_pub<br/>2. SPKB_pub + Signature<br/>3. OPKB_pub (if available)
+        
+        Note over Alice: Verify SPKB_pub signature
+        
+        Note over Alice: X3DH Key Agreement:<br/>1. DH1 = DH(IKA_priv, SPKB_pub)<br/>2. DH2 = DH(EKA_priv, IKB_pub)<br/>3. DH3 = DH(EKA_priv, SPKB_pub)<br/>4. DH4 = DH(EKA_priv, OPKB_pub) [if available]<br/>5. SK = KDF(DH1 || DH2 || DH3 || DH4)
+    end
+
+    %% Initial Message Phase
+    rect rgb(245, 245, 245)
+        Note over Alice: Encrypt initial message with SK
+        Alice->>+Sendbird: Send initial message:<br/>1. IKA_pub<br/>2. EKA_pub<br/>3. PreKey used identifiers<br/>4. Ciphertext
+        Sendbird-->>-Bob: Deliver initial message
+        
+        Note over Bob: Calculate same SK:<br/>1. DH1 = DH(SPKB_priv, IKA_pub)<br/>2. DH2 = DH(IKB_priv, EKA_pub)<br/>3. DH3 = DH(SPKB_priv, EKA_pub)<br/>4. DH4 = DH(OPKB_priv, EKA_pub) [if used]<br/>5. SK = KDF(DH1 || DH2 || DH3 || DH4)
+        Note over Bob: Delete OPKB_priv if used
+    end
+
+    %% Bidirectional Communication Phase
+    rect rgb(240, 255, 240)
+        Note over Alice,Bob: Double Ratchet Protocol
+        
+        Note over Bob: Generate new ratchet key pair (RKB_pub, RKB_priv)
+        Bob->>+Sendbird: Send response with RKB_pub
+        Sendbird-->>-Alice: Deliver response
+        Note over Alice: Update ratchet with RKB_pub
+        
+        Note over Alice: Generate new ratchet key pair (RKA_pub, RKA_priv)
+        Alice->>+Sendbird: Send message with RKA_pub
+        Sendbird-->>-Bob: Deliver message
+        Note over Bob: Update ratchet with RKA_pub
+        
+        Note over Alice,Bob: Each message:<br/>1. Generates new key pair<br/>2. Updates ratchet state<br/>3. Provides Perfect Forward Secrecy
+    end
+
+    %% PreKey Maintenance Phase
+    rect rgb(255, 240, 255)
+        Note over Bob: PreKey Maintenance
+        Bob->>+Server: Query remaining PreKey count
+        Server-->>-Bob: Return count
+        alt Count below threshold
+            Note over Bob: Generate new PreKey pairs
+            Bob->>Server: Upload new PreKey public keys
+        end
+    end
 ```
 
 ## 5. 技术方案
@@ -325,12 +361,13 @@ ChannelInfo 对象字段说明：
 ```
 
 #### 6.1.5 设备注册接口 (deviceRegistration)
-**使用场景**：用户在新设备上首次使用应用时，需要注册设备信息。
+**使用场景**：用户在新设备上首次使用应用时，需要注册设备信息和密钥信息。
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
 | userId | String | 用户ID |
 | deviceInfo | DeviceInfo | 设备信息对象 |
+| keyBundle | KeyBundle | 密钥包信息 |
 | 返回值 | DeviceRegistrationResponse | 设备注册响应 |
 
 DeviceInfo 对象字段说明：
@@ -345,11 +382,31 @@ DeviceInfo 对象字段说明：
 }
 ```
 
+KeyBundle 对象字段说明：
+```json
+{
+    "identityKey": {
+        "publicKey": "身份公钥",
+        "signature": "身份密钥签名"
+    },
+    "signedPreKey": {
+        "keyId": "签名预密钥ID",
+        "publicKey": "签名预密钥公钥",
+        "signature": "签名"
+    },
+    "oneTimePreKeys": [{
+        "keyId": "预密钥ID",
+        "publicKey": "预密钥公钥"
+    }]
+}
+```
+
 DeviceRegistrationResponse 对象字段说明：
 ```json
 {
     "deviceId": "已注册的设备ID",
     "registrationStatus": "注册状态",
+    "keyBundleStatus": "密钥包注册状态",
     "linkedDevices": [{
         "deviceId": "关联设备ID",
         "deviceType": "设备类型",
@@ -357,6 +414,12 @@ DeviceRegistrationResponse 对象字段说明：
     }]
 }
 ```
+
+注意事项：
+1. 所有私钥都在客户端本地生成和保存，永不上传
+2. 服务端作为密钥分发中心，只存储和分发公钥
+3. 设备注册是一个原子操作，设备信息和密钥包必须同时注册成功
+4. 注册成功后，设备即可参与加密通信
 
 #### 6.1.6 消息传输流程
 1. **建立连接**
@@ -489,144 +552,160 @@ sequenceDiagram
     Note over A,B: KEM预密钥定期更新（如每月）
 ```
 
-#### 6.2.1 获取预密钥包 (getPreKeys)
-**使用场景**：当用户A想要与用户B开始加密通信时，需要先获取用户B的预密钥包，用于建立安全的通信会话。通常在首次通信或会话密钥需要更新时调用。
+#### 6.2.1 Get PreKey Bundle (getPreKeys)
+**使用场景**：当用户A想要与用户B开始加密通信时，需要先获取用户B的 PreKey Bundle，用于建立安全的通信会话。通常在首次通信或会话密钥需要更新时调用。
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
 | targetIdentifier | ServiceIdentifier | 目标用户的服务标识符，包含身份类型和UUID |
-| deviceId | Optional<uint32> | 设备ID，如果不指定则返回所有设备的预密钥包 |
-| 返回值 | GetPreKeysResponse | 预密钥包响应对象 |
+| deviceId | Optional<uint32> | 设备ID，如果不指定则返回所有设备的 PreKey Bundle |
+| 返回值 | GetPreKeysResponse | PreKey Bundle Response |
 
 GetPreKeysResponse 对象字段说明：
 ```json
 {
-    "identityKey": "目标用户的身份公钥",
+    "identityKey": "bytes", // Identity Public Key
     "preKeys": {
-        "deviceId": {
-            "ecSignedPreKey": {
-                "keyId": "签名预密钥ID",
-                "publicKey": "签名预密钥公钥",
-                "signature": "签名"
+        "deviceId": { // key为设备ID
+            "ecSignedPreKey": { // EC Signed PreKey, required
+                "keyId": "int",
+                "publicKey": "bytes", // EC Public Key
+                "signature": "bytes"  // Signature by Identity Key
             },
-            "ecOneTimePreKey": {
-                "keyId": "一次性EC预密钥ID",
-                "publicKey": "一次性EC预密钥公钥"
+            "ecOneTimePreKey": { // EC One-Time PreKey, optional (may be empty if used)
+                "keyId": "int",
+                "publicKey": "bytes"  // EC Public Key
             },
-            "kemOneTimePreKey": {
-                "keyId": "KEM预密钥ID",
-                "publicKey": "KEM预密钥公钥",
-                "signature": "签名"
+            "kemOneTimePreKey": { // KEM One-Time PreKey, returns Last Resort PreKey if no One-Time PreKey available
+                "keyId": "int", 
+                "publicKey": "bytes",  // KEM Public Key
+                "signature": "bytes"   // Signature by Identity Key
             }
         }
     }
 }
 ```
 
-#### 6.2.2 获取预密钥数量 (getPreKeyCount)
-**使用场景**：服务器需要定期检查用户的可用预密钥数量，当数量低于阈值时通知客户端生成新的预密钥。这是确保系统始终有足够的预密钥可用的关键监控接口。
+**PreKey Availability**：
+1. EC Signed PreKey: Each device must have a valid Signed PreKey for initial session establishment
+2. EC One-Time PreKey: Returns one if available, empty if all used
+3. KEM One-Time PreKey: Prioritizes One-Time KEM PreKey, falls back to Last Resort PreKey if none available
+
+**注意事项**：
+1. One-Time PreKeys (EC and KEM) can only be used once
+2. Signed PreKey can be reused but should be rotated periodically
+3. When One-Time PreKeys are exhausted, system falls back to using Signed PreKey
+4. KEM PreKey provides post-quantum protection
+
+#### 6.2.2 Get PreKey Count (getPreKeyCount)
+**使用场景**：服务器需要定期检查用户的可用 PreKey 数量，当数量低于阈值时通知客户端生成新的 PreKey。这是确保系统始终有足够的 PreKey 可用的关键监控接口。
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
-| accountId | String | 账户ID，要查询的目标用户 |
-| deviceId | int | 设备ID，指定查询哪个设备的预密钥数量 |
-| identityType | IdentityType | 身份类型（ACI或PNI） |
-| 返回值 | PreKeyCount | 包含EC和KEM预密钥数量的对象 |
+| 无 | - | 使用认证信息识别设备 |
+| 返回值 | GetPreKeyCountResponse | PreKey Count Response |
 
-#### 6.2.3 设置一次性EC预密钥 (setOneTimeEcPreKeys)
-**使用场景**：当用户首次注册设备或预密钥数量不足时，客户端会生成一批新的EC预密钥并上传到服务器。支持批量设置以提高效率。
+GetPreKeyCountResponse 对象字段说明：
+```json
+{
+    "ecPreKeyCount": "int",  // ACI EC PreKey count
+    "kemPreKeyCount": "int" // ACI KEM PreKey count
+}
+```
+
+#### 6.2.3 Set EC One-Time PreKeys (setOneTimeEcPreKeys)
+**使用场景**：当用户首次注册设备或 PreKey 数量不足时，客户端会生成一批新的 EC PreKey 并上传到服务器。支持批量设置以提高效率。
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
-| identityType | IdentityType | 身份类型（ACI或PNI） |
-| preKeys | List<EcPreKey> | EC预密钥列表 |
-| 返回值 | SetPreKeyResponse | 设置结果响应 |
+| identityType | IdentityType | Identity Type (ACI or PNI) |
+| preKeys | List<EcPreKey> | EC PreKey List |
+| 返回值 | SetPreKeyResponse | Empty response indicates success |
 
 EcPreKey 对象字段说明：
 ```json
 {
-    "keyId": "预密钥ID",
-    "publicKey": "EC公钥",
-    "privateKey": "EC私钥（仅客户端保存）"
+    "keyId": "int",
+    "publicKey": "bytes"  // EC Public Key
 }
 ```
 
-#### 6.2.4 设置EC签名预密钥 (setEcSignedPreKey)
-**使用场景**：用户需要定期更新EC签名预密钥以增强安全性。与一次性预密钥不同，签名预密钥可以重复使用，但建议定期轮换（如每周）。
+#### 6.2.4 Set EC Signed PreKey (setEcSignedPreKey)
+**使用场景**：用户需要定期更新 EC Signed PreKey 以增强安全性。与 One-Time PreKey 不同，Signed PreKey 可以重复使用，但建议定期轮换（如每周）。
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
-| identityType | IdentityType | 身份类型（ACI或PNI） |
-| signedPreKey | EcSignedPreKey | EC签名预密钥对象 |
-| 返回值 | SetPreKeyResponse | 设置结果响应 |
+| identityType | IdentityType | Identity Type (ACI or PNI) |
+| signedPreKey | EcSignedPreKey | EC Signed PreKey Object |
+| 返回值 | SetPreKeyResponse | Empty response indicates success |
 
 EcSignedPreKey 对象字段说明：
 ```json
 {
-    "keyId": "签名预密钥ID",
-    "publicKey": "EC公钥",
-    "signature": "使用身份密钥对公钥的签名"
+    "keyId": "int",
+    "publicKey": "bytes",  // EC Public Key
+    "signature": "bytes"   // Signature by Identity Key
 }
 ```
 
-#### 6.2.5 设置一次性KEM预密钥 (setOneTimeKemSignedPreKeys)
-**使用场景**：为支持后量子加密，用户需要设置一批KEM（密钥封装机制）预密钥。这些预密钥提供抗量子计算攻击的能力。支持批量设置。
+#### 6.2.5 Set KEM One-Time PreKeys (setOneTimeKemSignedPreKeys)
+**使用场景**：为支持后量子加密，用户需要设置一批 KEM PreKey。这些 PreKey 提供抗量子计算攻击的能力。支持批量设置。
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
-| identityType | IdentityType | 身份类型（ACI或PNI） |
-| preKeys | List<KemSignedPreKey> | KEM签名预密钥列表 |
-| 返回值 | SetPreKeyResponse | 设置结果响应 |
+| identityType | IdentityType | Identity Type (ACI or PNI) |
+| preKeys | List<KemSignedPreKey> | KEM Signed PreKey List |
+| 返回值 | SetPreKeyResponse | Empty response indicates success |
 
 KemSignedPreKey 对象字段说明：
 ```json
 {
-    "keyId": "KEM预密钥ID",
-    "publicKey": "KEM公钥",
-    "signature": "使用身份密钥的签名"
+    "keyId": "int",
+    "publicKey": "bytes",  // KEM Public Key
+    "signature": "bytes"   // Signature by Identity Key
 }
 ```
 
 注意事项：
-1. KEM预密钥使用后量子安全的算法（如Kyber-1024）
-2. 每个KEM预密钥只能使用一次
-3. 服务端需要维护KEM预密钥的使用状态
-4. 建议的参数设置：
-   - 批量上传大小：20个
-   - 最小可用数量阈值：5个
+1. KEM PreKey uses post-quantum secure algorithm (e.g., Kyber-1024)
+2. Each KEM PreKey can only be used once
+3. Server maintains KEM PreKey usage status
+4. Recommended parameters:
+   - Batch upload size: 20
+   - Minimum available threshold: 5
 
-#### 6.2.6 获取密钥透明度证明 (getKeyTransparencyProof)
-**使用场景**：当用户需要验证其他用户的身份密钥是否可信时使用。这通常发生在首次通信或检测到对方密钥变更时，用于防止中间人攻击。
+#### 6.2.6 Get Key Transparency Proof (getKeyTransparencyProof)
+**使用场景**：当用户需要验证其他用户的 Identity Key 是否可信时使用。这通常发生在首次通信或检测到对方 Key 变更时，用于防止中间人攻击。
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
 | accountId | String | 账户ID，要获取证明的目标用户 |
-| 返回值 | KeyTransparencyProof | 密钥透明度证明对象 |
+| 返回值 | KeyTransparencyProof | Key Transparency Proof Object |
 
 KeyTransparencyProof 对象字段说明：
 ```json
 {
     "accountId": "账户ID",
     "keyHistory": [{
-        "identityKey": "历史身份公钥",
+        "identityKey": "Identity Public Key",
         "timestamp": "使用时间戳"
     }],
     "proof": {
-        "merkleRoot": "Merkle树根哈希",
-        "merkleProof": "Merkle包含性证明",
-        "signature": "服务器签名"
+        "merkleRoot": "Merkle Tree Root Hash",
+        "merkleProof": "Merkle Inclusion Proof",
+        "signature": "Server Signature"
     }
 }
 ```
 
-#### 6.2.7 验证密钥透明度证明 (verifyKeyTransparency)
-**使用场景**：收到其他用户的密钥透明度证明后，需要验证其有效性。这是确保通信安全的关键步骤，可以检测是否存在恶意的密钥替换。
+#### 6.2.7 Verify Key Transparency Proof (verifyKeyTransparency)
+**使用场景**：收到其他用户的 Key Transparency Proof 后，需要验证其有效性。这是确保通信安全的关键步骤，可以检测是否存在恶意的 Key 替换。
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
 | accountId | String | 账户ID，要验证证明的用户 |
-| proof | KeyTransparencyProof | 待验证的密钥透明度证明 |
-| 返回值 | boolean | 验证结果：true-有效，false-无效 |
+| proof | KeyTransparencyProof | Key Transparency Proof to verify |
+| 返回值 | boolean | Verification result: true-valid, false-invalid |
 
 #### 6.2.8 发送加密消息(走sendbird订阅，这里只是例子)
 **使用场景**：用户A要向用户B发送加密消息时调用。消息在客户端使用会话密钥加密后，通过该接口发送给服务器。
@@ -641,14 +720,14 @@ KeyTransparencyProof 对象字段说明：
 EncryptedMessage 对象字段说明：
 ```json
 {
-    "messageId": "消息唯一标识",
-    "senderId": "发送者账户ID",
-    "senderDeviceId": "发送者设备ID",
-    "ciphertext": "加密后的消息内容",
-    "messageType": "消息类型（文本/图片/文件等）",
-    "timestamp": "发送时间戳",
-    "ephemeralKey": "临时公钥（如果使用）",
-    "messageNumber": "消息序号（用于防重放）"
+    "messageId": "Message Unique Identifier",
+    "senderId": "Sender Account ID",
+    "senderDeviceId": "Sender Device ID",
+    "ciphertext": "Encrypted Message Content",
+    "messageType": "Message Type (Text/Image/File etc.)",
+    "timestamp": "Sent Timestamp",
+    "ephemeralKey": "Ephemeral Public Key (if used)",
+    "messageNumber": "Message Sequence Number (for replay protection)"
 }
 ```
 
@@ -670,105 +749,105 @@ EncryptedMessage 对象字段说明：
 所有接口可能抛出的异常包括：
 ```json
 {
-    "KeyNotFoundException": "请求的密钥不存在",
-    "KeyValidationException": "密钥验证失败",
-    "DeviceNotFoundException": "指定的设备不存在",
-    "QuotaExceededException": "超出配额限制",
-    "InvalidParameterException": "参数无效",
-    "AuthenticationException": "身份验证失败",
-    "ServerException": "服务器内部错误"
+    "KeyNotFoundException": "Requested key not found",
+    "KeyValidationException": "Key validation failed",
+    "DeviceNotFoundException": "Specified device not found",
+    "QuotaExceededException": "Quota limit exceeded",
+    "InvalidParameterException": "Invalid parameters",
+    "AuthenticationException": "Authentication failed",
+    "ServerException": "Internal server error"
 }
 ```
 
-#### 6.2.0 预密钥管理机制
+#### 6.2.0 PreKey Management Mechanism
 
-1. **预密钥配额**
+1. **PreKey Quota**
    ```json
    {
-       "maxPreKeysPerDevice": 100,    // 每个设备最大预密钥数量
-       "minPreKeysThreshold": 20,     // 最小阈值
-       "batchUploadSize": 50,         // 批量上传大小
-       "preKeyTTL": 604800,          // 预密钥有效期(7天)
+       "maxPreKeysPerDevice": 100,    // Maximum PreKeys per device
+       "minPreKeysThreshold": 20,     // Minimum threshold
+       "batchUploadSize": 50,         // Batch upload size
+       "preKeyTTL": 604800,          // PreKey TTL (7 days)
        "signedPreKey": {
-           "rotationInterval": 604800  // 签名预密钥轮换间隔(7天)
+           "rotationInterval": 604800  // Signed PreKey rotation interval (7 days)
        }
    }
    ```
 
-2. **预密钥状态**
+2. **PreKey Status**
    ```json
    {
-       "AVAILABLE": "可用",
-       "USED": "已使用",
-       "EXPIRED": "已过期"
+       "AVAILABLE": "Available",
+       "USED": "Used",
+       "EXPIRED": "Expired"
    }
    ```
 
-3. **客户端主动管理机制**
-   - 客户端负责生成和管理所有密钥
-   - 客户端在以下时机检查预密钥数量：
-     * 应用启动时
-     * 发送/接收消息前
-     * 定期检查(如每天)
-   - 当预密钥数量低于阈值时，客户端自动生成新的预密钥并上传
+3. *客户端主动管理机制**
+   - Client is responsible for generating and managing all keys
+   - Client checks PreKey count at:
+     * Application startup
+     * Before sending/receiving messages
+     * Periodic checks (e.g., daily)
+   - When PreKey count is below threshold, client automatically generates and uploads new PreKeys
 
 4. **服务端职责**
-   - 仅作为密钥分发中心
-   - 存储和分发预密钥包
-   - 维护预密钥使用状态
-   - 提供预密钥数量查询接口
+   - Acts only as key distribution center
+   - Stores and distributes PreKey Bundles
+   - Maintains PreKey usage status
+   - Provides PreKey count query interface
 
-5. **预密钥分发流程**
+5. **PreKey Distribution Flow**
    ```mermaid
    sequenceDiagram
-       participant A as 发送方
-       participant Server as 密钥服务器
-       participant B as 接收方
+       participant A as Sender
+       participant Server as Key Server
+       participant B as Receiver
        
-       B->>B: 生成预密钥
-       B->>Server: 上传预密钥包
+       B->>B: Generate PreKeys
+       B->>Server: Upload PreKey Bundle
        
-       A->>Server: 请求B的预密钥
-       alt 有可用的一次性预密钥
-           Server-->>A: 返回一次性预密钥包
-           Server->>Server: 标记预密钥为已使用
-       else 一次性预密钥耗尽
-           Server-->>A: 返回签名预密钥包
+       A->>Server: Request B's PreKey
+       alt Available One-Time PreKey
+           Server-->>A: Return One-Time PreKey Bundle
+           Server->>Server: Mark PreKey as used
+       else One-Time PreKeys exhausted
+           Server-->>A: Return Signed PreKey Bundle
        end
        
-       B->>Server: 查询预密钥数量
-       Server-->>B: 返回可用数量
-       Note over B: 如果数量低于阈值
-       B->>B: 生成新预密钥
-       B->>Server: 上传新预密钥包
+       B->>Server: Query PreKey count
+       Server-->>B: Return available count
+       Note over B: If count below threshold
+       B->>B: Generate new PreKeys
+       B->>Server: Upload new PreKey Bundle
    ```
 
-6. **密钥生成规则**
-   - 长期身份密钥对：设备首次注册时生成
-   - 签名预密钥：每个设备只维护一个当前有效的签名预密钥，定期轮换(如每周)
-   - 一次性预密钥对：批量生成，保持充足数量
+6. **Key Generation Rules**
+   - Identity Key Pair: Generated at device first registration
+   - Signed PreKey: Each device maintains one active Signed PreKey, rotated periodically (weekly)
+   - One-Time PreKey Pairs: Batch generated to maintain sufficient supply
 
-7. **预密钥耗尽处理机制**
-   - 正常模式：使用一次性预密钥
-     * 优先使用一次性预密钥建立会话
-     * 每个预密钥只使用一次，确保最佳安全性
+7. **PreKey Exhaustion Handling**
+   - Normal Mode: Using One-Time PreKey
+     * Prioritize One-Time PreKey for session establishment
+     * Each PreKey used only once for optimal security
    
-   - 降级模式：使用签名预密钥
-     * 当一次性预密钥耗尽时，使用签名预密钥
-     * 多个会话可以共用同一个签名预密钥
-     * 仍然保证基本的前向安全性
+   - Fallback Mode: Using Signed PreKey
+     * Use Signed PreKey when One-Time PreKeys exhausted
+     * Multiple sessions can share same Signed PreKey
+     * Still maintains Forward Secrecy
    
-   - 应急模式：设备完全离线
-     * 当设备长期离线导致签名预密钥也过期时
-     * 服务端将该设备标记为"需要重新注册"状态
-     * 其他用户尝试建立新会话时返回错误提示
-     * 设备重新上线后需要重新生成并上传密钥包
-     * 用户界面提示"等待对方设备上线后才能发送消息"
+   - Emergency Mode: Device Offline
+     * When device is offline and Signed PreKey expires
+     * Server marks device as "Needs Re-registration"
+     * New session attempts return error
+     * Device must generate and upload new PreKey Bundle upon reconnection
+     * UI shows "Waiting for device to come online"
 
-   - 安全考虑：
-     * 签名预密钥由身份密钥签名，可验证其有效性
-     * 定期轮换签名预密钥降低风险
-     * 完全离线时阻止新会话，而不是降低安全性
+   - Security Considerations:
+     * Signed PreKey verified by Identity Key signature
+     * Regular Signed PreKey rotation reduces risk
+     * Block new sessions when offline rather than compromise security
 
 ### 6.3 聊天列表
 
@@ -969,10 +1048,10 @@ ChatVisibility 对象字段说明：
 ```
 
 ### 6.5 用户封禁
-封禁后，直接在对应senbird群组中设置禁言。
+封禁后，直接在对应Sendbird群组中设置禁言。
 
 ### 6.6 聊天限制
-只有满足条件，才会授予在senbird群组发言的权限。
+只有满足条件，才会授予在Sendbird群组发言的权限。
 
 ### 6.7 用户钱包余额查询
 ```mermaid
