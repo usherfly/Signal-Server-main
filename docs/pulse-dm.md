@@ -383,7 +383,9 @@ ChannelInfo 对象字段说明：
 ```
 
 #### 6.1.5 设备注册接口 (deviceRegistration)
-**使用场景**：用户在新设备上首次使用应用时，需要注册设备信息和密钥信息。
+**使用场景**：
+- 用户在新设备上首次使用应用时，需要注册设备信息和密钥信息。
+- 用户设备重置(以前的历史信息肯定无法查看了)
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
@@ -400,7 +402,7 @@ DeviceInfo 对象字段说明：
     "appVersion": "应用版本号",
     "pushToken": "推送通知令牌",
     "registrationId": "Signal协议注册ID"，
-    "identityPublicKey": "Identity Public Key"
+    "identityKey": "Identity Public Key"
 }
 ```
 DeviceRegistrationResponse 对象字段说明：
@@ -516,7 +518,7 @@ sequenceDiagram
     Note over B: 5. 更新接收链密钥
 
     %% 预密钥维护
-    B->>Server: getPreKeyCount(B的accountId, deviceId)
+    B->>Server: getOneTimePreKeyCount(B的accountId, deviceId)
     Server-->>B: 返回预密钥数量
     Note over B: 如果预密钥数量低于阈值
     B->>Server: setOneTimeEcPreKeys(accountId, deviceId, newPreKeys)
@@ -528,12 +530,18 @@ sequenceDiagram
 ```
 
 #### 6.2.1 Get PreKey Bundle (getPreKeys)
-**使用场景**：当用户A想要与用户B开始加密通信时，需要先获取用户B的 PreKey Bundle，用于建立安全的通信会话。通常在首次通信或会话密钥需要更新时调用。
+**使用场景**：
+- 当用户A想要与用户B开始加密通信时，需要先获取用户B的 PreKey Bundle，用于建立安全的通信会话。通常在首次通信或会话密钥需要更新时调用。
+- 每次获取会有日志记录
+- 为避免恶意攻击，按照用户维度限流
+- 服务端保证one time prekey的唯一性，和不会二次分发
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
-| targetIdentifier | ServiceIdentifier | 目标用户的服务标识符，包含身份类型和UUID |
-| deviceId | Optional<uint32> | 设备ID，如果不指定则返回所有设备的 PreKey Bundle |
+| targetUserId | String | 单聊目标userId |
+| targeDeviceId | String | 单聊目标设备ID |
+| userId | String | 当前userId |
+| deviceId | String | 当前设备ID |
 | 返回值 | GetPreKeysResponse | PreKey Bundle Response |
 
 GetPreKeysResponse 对象字段说明：
@@ -572,14 +580,13 @@ GetPreKeysResponse 对象字段说明：
 3. When One-Time PreKeys are exhausted, system falls back to using Signed PreKey
 4. KEM PreKey provides post-quantum protection
 
-#### 6.2.2 Get PreKey Count (getPreKeyCount)
+#### 6.2.2 Get One Time PreKey Count (getOneTimePreKeyCount)
 **使用场景**：
-- 服务器需要定期检查用户的可用 PreKey 数量，当数量低于阈值时通知客户端生成新的 PreKey。这是确保系统始终有足够的 PreKey 可用的关键监控接口。
-- 要有申请记录
+- 客户端需要定期检查用户的可用 PreKey 数量，当数量低于阈值时生成新的 PreKey。这是确保系统始终有足够的 PreKey 可用的关键监控接口。
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
-| 无 | - | 使用认证信息识别设备 |
+| deviceId | String | 设备ID |
 | 返回值 | GetPreKeyCountResponse | PreKey Count Response |
 
 GetPreKeyCountResponse 对象字段说明：
@@ -595,8 +602,8 @@ GetPreKeyCountResponse 对象字段说明：
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
-| deviceId |  | |
-| identityKey | | |
+| deviceId | String | 设备ID |
+| identityKey | bytes| Identity Public Key |
 | preKeys | List<EcPreKey> | EC PreKey List |
 | 返回值 | SetPreKeyResponse | Empty response indicates success |
 
@@ -613,8 +620,8 @@ EcPreKey 对象字段说明：
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
-| deviceId |  | |
-| identityKey | | |
+| deviceId | String | 设备ID |
+| identityKey | bytes| Identity Public Key |
 | signedPreKey | EcSignedPreKey | EC Signed PreKey Object |
 | 返回值 | SetPreKeyResponse | Empty response indicates success |
 
@@ -632,8 +639,8 @@ EcSignedPreKey 对象字段说明：
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
-| deviceId |  | |
-| identityKey |  | |
+| deviceId | String | 设备ID |
+| identityKey | bytes| Identity Public Key |
 | preKeys | List<KemSignedPreKey> | KEM Signed PreKey List |
 | 返回值 | SetPreKeyResponse | Empty response indicates success |
 
@@ -1246,6 +1253,9 @@ PulseTransactionResponse 对象字段说明：
 
 - 单聊的sendbird独立新建应用，不应干扰现有推送
 - 利用pulse现有的推送，指定推送内容。
+- 待确认
+    - 是否需要用户级配置，指定push开关
+    - push实际：只有第一条消息，还是所有
 
 ### 6.8 用户钱包余额查询
 ```mermaid
@@ -1256,6 +1266,28 @@ graph TD
     C --> E[更新余额缓存]
     D --> E
 ```
+
+## 7. 时间预估
+
+| 模块 | 子任务 | 耗时 |
+|:------:|:--------|:------:|
+| **单聊通信** | • 多设备信息存储与激活管理<br>• 设备注册与管理接口<br>• 单聊频道创建与信息查询 | 4天 |
+| **消息加密** | • key存储与周期维护<br>• PreKey Bundle 上传/分发 | 3天 |
+| **聊天列表** | • 获取聊天列表<br>• 聊天项更新(置顶) | 2天 |
+| **关系管理** | • 关系存储实现<br>• 关系修改(关注/封禁/举报) | 2天 |
+| **聊天限制** | • 消息发送权限检查<br>• Pulse消耗记录接口<br>• Push通知集成 | 3天 |
+
+### 关键路径
+1. 单聊通信 → 消息加密 → 聊天列表
+2. 其他功能可并行开发
+
+### 风险因素
+| 风险 | 应对措施 |
+|:------:|:--------:|
+| Signal Protocol实现复杂 | 提前技术预研 |
+| 多设备同步问题 | 完善测试场景 |
+
+**总工期**：两人并行开发，工期7天
 
 
 
