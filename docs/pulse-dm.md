@@ -540,8 +540,8 @@ GetPreKeysResponse 对象字段说明：
 ```json
 {
     "identityKey": "bytes", // Identity Public Key
+    "deviceId": "bytes"    // key为设备ID,  bid
     "preKeys": {
-        "deviceId": { // key为设备ID
             "ecSignedPreKey": { // EC Signed PreKey, required
                 "keyId": "int",
                 "publicKey": "bytes", // EC Public Key
@@ -573,7 +573,9 @@ GetPreKeysResponse 对象字段说明：
 4. KEM PreKey provides post-quantum protection
 
 #### 6.2.2 Get PreKey Count (getPreKeyCount)
-**使用场景**：服务器需要定期检查用户的可用 PreKey 数量，当数量低于阈值时通知客户端生成新的 PreKey。这是确保系统始终有足够的 PreKey 可用的关键监控接口。
+**使用场景**：
+- 服务器需要定期检查用户的可用 PreKey 数量，当数量低于阈值时通知客户端生成新的 PreKey。这是确保系统始终有足够的 PreKey 可用的关键监控接口。
+- 要有申请记录
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
@@ -593,6 +595,8 @@ GetPreKeyCountResponse 对象字段说明：
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
+| deviceId |  | |
+| identityKey | | |
 | preKeys | List<EcPreKey> | EC PreKey List |
 | 返回值 | SetPreKeyResponse | Empty response indicates success |
 
@@ -609,6 +613,8 @@ EcPreKey 对象字段说明：
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
+| deviceId |  | |
+| identityKey | | |
 | signedPreKey | EcSignedPreKey | EC Signed PreKey Object |
 | 返回值 | SetPreKeyResponse | Empty response indicates success |
 
@@ -626,6 +632,8 @@ EcSignedPreKey 对象字段说明：
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
+| deviceId |  | |
+| identityKey |  | |
 | preKeys | List<KemSignedPreKey> | KEM Signed PreKey List |
 | 返回值 | SetPreKeyResponse | Empty response indicates success |
 
